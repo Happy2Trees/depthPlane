@@ -1,0 +1,40 @@
+# Defaults consumed by main.py; override via CLI flags as needed.
+
+depth_map:
+  las: data/CAE.las
+  resolution_m_per_px: 0.01  # grid spacing (m/px)
+  plane_z_m: 0.0
+  statistic: mean           # min | max | mean
+  chunk_size: 2000000       # points per stream chunk
+  clip_min_mm: 1300         # ignore z below this (mm), null to disable
+  clip_max_mm: 1600         # ignore z above this (mm), null to disable
+  output_npy: output/depth_map.npy
+  meta_json: output/metadata.json
+  output_image: visualize/depth_map.png
+
+cad_overlay:
+  mesh: data/CAD_wo_btm.stl
+  unit_scale: 0.001         # CAD units to meters (e.g., mm -> m)
+  sharp_angle_deg: 25.0     # keep edges sharper t a an this
+  merge_angle_deg: 5.0      # merge collinear edges within this angle
+  merge_join_m: 0.02        # snap endpoints within this distance
+  min_length_m: 0.02        # drop edges shorter than this
+  line_width_px: 3
+  transform: data/pose/final_transformation_matrix.txt
+  points_npy: output/cad_points_aligned.npy
+  edges_npy: output/cad_edges_2d.npy
+  projection_npy: output/cad_projection.npy
+  projection_image: visualize/cad_projection.png
+  projection_mask_image: output/cad_projection_mask.png
+  overlay_image: visualize/depth_with_cad.png
+  slice_mode: bottom             # top | bottom | nearest
+  slice_half_thickness_m: 0.05   # only used for nearest
+  sample_mode: edge              # edge | points (edge = feature edges rasterized)
+  sample_points: 3000000         # number of CAD surface samples before projection
+  # z 슬랩 자르기: z <= (mesh_min_z + clip_bottom_height_m) 만 남김. null이면 미적용.
+  # bottom 모드에서도 적용되므로 너무 작게 잡으면 픽셀 소수가 될 수 있음.
+  clip_bottom_height_m: null
+
+  
+  rasterize: False               # render triangles directly (no point sampling)
+  subdivide_iters: 0             # only used when rasterize=True

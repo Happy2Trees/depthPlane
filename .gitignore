@@ -1,0 +1,14 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# SAM3 test artifacts
+tests/results/*.png
+tests/results/*.npz
+
+# Large/local data and outputs
+data/
+output/
+temp/
+__pycache__/
+.pytest_cache/
