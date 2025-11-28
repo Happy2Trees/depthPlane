@@ -10,17 +10,13 @@ import numpy as np
 import yaml
 
 from src.cad_projection import (
-    apply_transform,
-    extract_feature_edges,
     clip_edges_by_bottom_height,
-    load_mesh_vertices,
     load_transform_matrix,
-    merge_collinear_edges,
     project_edges_to_grid,
-    project_surface_slice_to_grid,
     save_projection_images,
     save_projection_mask,
 )
+from src.occ_projection import run_hlr_projection
 from src.depth_map import DepthMapResult, generate_depth_map, save_depthmap_visualization
 
 DEFAULT_CONFIG_PATH = Path("configs/main.yaml")
@@ -73,9 +69,6 @@ def _extract_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("cad_overlay must be a mapping.")
         set_if_present(cad_cfg, "mesh", "cad_mesh", Path, defaults)
         set_if_present(cad_cfg, "unit_scale", "cad_unit_scale", float, defaults)
-        set_if_present(cad_cfg, "sharp_angle_deg", "cad_sharp_angle_deg", float, defaults)
-        set_if_present(cad_cfg, "merge_angle_deg", "cad_merge_angle_deg", float, defaults)
-        set_if_present(cad_cfg, "merge_join_m", "cad_merge_join", float, defaults)
         set_if_present(cad_cfg, "min_length_m", "cad_min_length", float, defaults)
         set_if_present(cad_cfg, "line_width_px", "cad_line_width", int, defaults)
         set_if_present(cad_cfg, "transform", "cad_transform", Path, defaults)
@@ -97,16 +90,8 @@ def _extract_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
             defaults,
         )
         set_if_present(cad_cfg, "overlay_image", "cad_overlay_image", Path, defaults)
-        set_if_present(cad_cfg, "slice_mode", "cad_slice_mode", str, defaults)
-        set_if_present(
-            cad_cfg,
-            "slice_half_thickness_m",
-            "cad_slice_half_thickness",
-            float,
-            defaults,
-        )
         set_if_present(cad_cfg, "sample_mode", "cad_sample_mode", str, defaults)
-        set_if_present(cad_cfg, "sample_points", "cad_sample_points", int, defaults)
+        set_if_present(cad_cfg, "hlr_step_m", "cad_hlr_step", float, defaults)
         set_if_present(
             cad_cfg,
             "clip_bottom_height_m",
@@ -114,8 +99,6 @@ def _extract_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
             float,
             defaults,
         )
-        set_if_present(cad_cfg, "rasterize", "cad_rasterize", bool, defaults)
-        set_if_present(cad_cfg, "subdivide_iters", "cad_subdivide_iters", int, defaults)
 
     return defaults
 
@@ -208,34 +191,16 @@ def main() -> None:
         help="Scale factor to convert CAD units to meters (use 0.001 for mm -> m).",
     )
     parser.add_argument(
-        "--cad-sharp-angle-deg",
-        type=float,
-        default=25.0,
-        help="If face normals differ by more than this, keep the shared edge (deg).",
-    )
-    parser.add_argument(
-        "--cad-merge-angle-deg",
-        type=float,
-        default=5.0,
-        help="Angle tolerance (deg) for merging collinear edges after projection.",
-    )
-    parser.add_argument(
-        "--cad-merge-join",
-        type=float,
-        default=0.02,
-        help="Join tolerance (m) for snapping endpoints while merging edges.",
-    )
-    parser.add_argument(
-        "--cad-min-length",
-        type=float,
-        default=0.02,
-        help="Discard edges shorter than this (m) before merging and rasterizing.",
-    )
-    parser.add_argument(
         "--cad-line-width",
         type=int,
         default=1,
         help="Line width in pixels when rasterizing edges (default: 1).",
+    )
+    parser.add_argument(
+        "--cad-min-length",
+        type=float,
+        default=0.0,
+        help="Discard HLR edge segments shorter than this length (meters).",
     )
     parser.add_argument(
         "--cad-transform",
@@ -283,7 +248,10 @@ def main() -> None:
     parser.add_argument(
         "--save-cad-heatmap",
         action="store_true",
-        help="Save an additional full-range CAD occupancy heatmap into output/ (disabled by default).",
+        help=(
+            "Save an additional full-range CAD occupancy heatmap into output/ "
+            "(disabled by default)."
+        ),
     )
     parser.add_argument(
         "--cad-projection-mask-image",
@@ -304,39 +272,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--cad-slice-mode",
-        choices=["top", "bottom", "nearest"],
-        default="top",
-        help=(
-            "Surface slice to keep when projecting CAD: "
-            "top=max z, bottom=min z, nearest=closest to plane_z."
-        ),
-    )
-    parser.add_argument(
-        "--cad-slice-half-thickness",
-        type=float,
-        default=0.03,
-        help=(
-            "Half thickness (m) around plane_z when slice-mode=nearest; "
-            "points farther are ignored."
-        ),
-    )
-    parser.add_argument(
         "--cad-sample-mode",
-        choices=["points", "edge"],
-        default="points",
-        help=(
-            "Projection source: 'points' samples CAD surface (existing behavior); "
-            "'edge' rasterizes feature edges after clipping to bottom height."
-        ),
+        choices=["hlr"],
+        default="hlr",
+        help="Projection source: 'hlr' uses PythonOCC hidden-line projection to 2D polylines.",
     )
     parser.add_argument(
-        "--cad-sample-points",
-        type=int,
-        default=200_000,
+        "--cad-hlr-step",
+        type=float,
+        default=0.01,
         help=(
-            "Number of surface samples drawn from the CAD mesh before projection "
-            "(higher for sparse meshes)."
+            "Approximate spacing in meters between sampled points along HLR "
+            "visible edges (cad-sample-mode=hlr)."
         ),
     )
     parser.add_argument(
@@ -346,23 +293,6 @@ def main() -> None:
         help=(
             "If set, pre-clip the CAD mesh to triangles with z within this height above "
             "its minimum z before sampling (meters)."
-        ),
-    )
-    parser.add_argument(
-        "--cad-rasterize",
-        action="store_true",
-        help=(
-            "Rasterize triangles directly onto the grid (no point sampling). "
-            "Uses z-buffer per pixel respecting slice-mode."
-        ),
-    )
-    parser.add_argument(
-        "--cad-subdivide-iters",
-        type=int,
-        default=0,
-        help=(
-            "If >0, subdivide CAD triangles (Loop) this many times before clipping/"
-            "sampling/rasterizing to densify simplified meshes."
         ),
     )
     parser.add_argument(
@@ -447,44 +377,37 @@ def main() -> None:
         print(f"Visualization saved to {args.output_image}")
 
     if not args.no_cad:
-        print(
-            "\n[CAD overlay] extracting feature edges and projecting "
-            f"(mode={args.cad_sample_mode})...",
-        )
-        verts, tris = load_mesh_vertices(args.cad_mesh, scale=args.cad_unit_scale)
+        print("\n[CAD overlay] projecting with PythonOCC HLR...")
         transform = load_transform_matrix(args.cad_transform)
-        # Expect transform already in CAD->LiDAR direction; do not invert here.
-        verts_world = apply_transform(verts, transform)
-        mesh_min_z = float(verts_world[:, 2].min())
-
-        edges = extract_feature_edges(
-            verts_world,
-            tris,
-            sharp_angle_deg=args.cad_sharp_angle_deg,
-        )
-        merged_edges = merge_collinear_edges(
-            edges,
-            angle_tol_deg=args.cad_merge_angle_deg,
-            join_tol=args.cad_merge_join,
-            min_length=args.cad_min_length,
-        )
-
+        # Set up shared placeholders for downstream save/visualization.
+        verts_world = np.empty((0, 3), dtype=np.float64)
         edges_world = np.empty((0, 2, 3), dtype=np.float64)
         clip_dropped = 0
-        if merged_edges:
-            edges_world = np.stack(merged_edges, axis=0)
-            if args.cad_sample_mode == "edge" and args.cad_clip_bottom_height is not None:
-                before_clip = edges_world.shape[0]
-                edges_world = clip_edges_by_bottom_height(
-                    edges_world,
-                    mesh_min_z=mesh_min_z,
-                    clip_bottom_height=args.cad_clip_bottom_height,
-                )
-                clip_dropped = before_clip - edges_world.shape[0]
-        if edges_world.size:
-            edges_xy = edges_world[:, :, :2]
-        else:
-            edges_xy = np.empty((0, 2, 2), dtype=np.float64)
+
+        hlr = run_hlr_projection(
+            cad_path=args.cad_mesh,
+            unit_scale=args.cad_unit_scale,
+            transform_matrix=transform,
+            projection_dir=(0.0, 0.0, 1.0),
+            sample_step=args.cad_hlr_step,
+            min_length=args.cad_min_length,
+        )
+        if hlr.polylines_world:
+            verts_world = np.concatenate(hlr.polylines_world, axis=0)
+        edges_world = hlr.edges_world
+        if args.cad_clip_bottom_height is not None and edges_world.size:
+            mesh_min_z = float(edges_world[:, :, 2].min())
+            before_clip = edges_world.shape[0]
+            edges_world = clip_edges_by_bottom_height(
+                edges_world,
+                mesh_min_z=mesh_min_z,
+                clip_bottom_height=args.cad_clip_bottom_height,
+            )
+            clip_dropped = before_clip - edges_world.shape[0]
+        edges_xy = edges_world[:, :, :2] if edges_world.size else np.empty(
+            (0, 2, 2),
+            dtype=np.float64,
+        )
 
         args.cad_points_npy.parent.mkdir(parents=True, exist_ok=True)
         np.save(args.cad_points_npy, verts_world)
@@ -494,8 +417,9 @@ def main() -> None:
 
         if edges_xy.size:
             print(
-                f"Edges kept: {edges_xy.shape[0]:,} (after merge); "
-                f"saved 3D verts to {args.cad_points_npy}, 2D edges to {args.cad_edges_npy}"
+                f"Edges kept: {edges_xy.shape[0]:,}; "
+                f"saved 3D verts to {args.cad_points_npy}, "
+                f"2D edges to {args.cad_edges_npy}"
             )
         else:
             print(
@@ -505,46 +429,29 @@ def main() -> None:
 
         occupancy: np.ndarray
         proj_stats: dict[str, int | float | str | None]
-        if args.cad_sample_mode == "edge":
-            if edges_xy.size:
-                occupancy, dropped_extent = project_edges_to_grid(
-                    edges_xy,
-                    extent=result.extent,
-                    resolution=result.resolution,
-                    grid_shape=result.depth_mm.shape,
-                    line_width_px=args.cad_line_width,
-                )
-            else:
-                occupancy = np.zeros(result.depth_mm.shape, dtype=np.uint32)
-                dropped_extent = 0
-            proj_stats = {
-                "sample_mode": "edge",
-                "edges_after_merge": int(edges_xy.shape[0]),
-                "dropped_by_bottom_clip": int(clip_dropped),
-                "dropped_outside_extent": int(dropped_extent),
-                "line_width_px": int(args.cad_line_width),
-                "clip_bottom_height": (
-                    None
-                    if args.cad_clip_bottom_height is None
-                    else float(args.cad_clip_bottom_height)
-                ),
-            }
-        else:
-            occupancy, proj_stats = project_surface_slice_to_grid(
-                verts_world,
-                tris,
+        if edges_xy.size:
+            occupancy, dropped_extent = project_edges_to_grid(
+                edges_xy,
                 extent=result.extent,
                 resolution=result.resolution,
                 grid_shape=result.depth_mm.shape,
-                plane_z=args.plane_z,
-                slice_mode=args.cad_slice_mode,
-                slice_half_thickness=args.cad_slice_half_thickness,
-                num_samples=args.cad_sample_points,
-                clip_bottom_height=args.cad_clip_bottom_height,
-                rasterize=args.cad_rasterize,
-                subdivide_iters=args.cad_subdivide_iters,
+                line_width_px=args.cad_line_width,
             )
-            proj_stats["sample_mode"] = "points"
+        else:
+            occupancy = np.zeros(result.depth_mm.shape, dtype=np.uint32)
+            dropped_extent = 0
+        proj_stats = {
+            "sample_mode": "hlr",
+            "edges_after_merge": int(edges_xy.shape[0]),
+            "dropped_by_bottom_clip": int(clip_dropped),
+            "dropped_outside_extent": int(dropped_extent),
+            "line_width_px": int(args.cad_line_width),
+            "clip_bottom_height": (
+                None
+                if args.cad_clip_bottom_height is None
+                else float(args.cad_clip_bottom_height)
+            ),
+        }
 
         args.cad_projection_npy.parent.mkdir(parents=True, exist_ok=True)
         np.save(args.cad_projection_npy, occupancy)
@@ -553,33 +460,18 @@ def main() -> None:
             "CAD occupancy range: "
             f"min={np.min(occupancy):.0f}, max={np.max(occupancy):.0f} counts/pixel",
         )
-        if args.cad_sample_mode == "edge":
-            print(
-                "Projection stats: "
-                f"edges={proj_stats['edges_after_merge']:,}, "
-                f"dropped_clip={proj_stats['dropped_by_bottom_clip']:,}, "
-                f"dropped_extent={proj_stats['dropped_outside_extent']:,}, "
-                f"line_width_px={proj_stats['line_width_px']}, "
-                f"clip_bottom_height={proj_stats['clip_bottom_height']}",
-            )
-        else:
-            print(
-                "Projection stats: "
-                f"samples={proj_stats['sampled_points']:,}, "
-                f"vertices={proj_stats['included_vertices']:,}, "
-                f"inside={proj_stats['points_inside_extent']:,}, "
-                f"occupied_pixels={proj_stats['occupied_pixels']:,}, "
-                f"mode={proj_stats['slice_mode']}, "
-                f"thickness={proj_stats['slice_half_thickness']:.3f} m",
-            )
+        print(
+            "Projection stats: "
+            f"edges={proj_stats['edges_after_merge']:,}, "
+            f"dropped_clip={proj_stats['dropped_by_bottom_clip']:,}, "
+            f"dropped_extent={proj_stats['dropped_outside_extent']:,}, "
+            f"line_width_px={proj_stats['line_width_px']}, "
+            f"clip_bottom_height={proj_stats['clip_bottom_height']}",
+        )
 
         if not args.no_visual:
-            # For edge mode, binarize for clearer overlay; keep raw occupancy saved in npy.
-            occupancy_vis = (
-                (occupancy > 0).astype(np.uint8)
-                if args.cad_sample_mode == "edge"
-                else occupancy
-            )
+            # For HLR mode, binarize for clearer overlay; keep raw occupancy saved in npy.
+            occupancy_vis = (occupancy > 0).astype(np.uint8)
             save_projection_images(
                 occupancy=occupancy_vis,
                 extent=result.extent,
@@ -587,7 +479,7 @@ def main() -> None:
                 overlay_base=result.depth_mm,
                 overlay_image=args.cad_overlay_image,
                 plane_z=args.plane_z,
-                binarize=args.cad_sample_mode == "edge",
+                binarize=True,
             )
             print(f"CAD projection image saved to {args.cad_projection_image}")
             print(f"Depth/CAD overlay image saved to {args.cad_overlay_image}")
