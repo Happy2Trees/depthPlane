@@ -73,7 +73,9 @@ def _extract_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
         set_if_present(cad_cfg, "line_width_px", "cad_line_width", int, defaults)
         set_if_present(cad_cfg, "transform", "cad_transform", Path, defaults)
         set_if_present(cad_cfg, "points_npy", "cad_points_npy", Path, defaults)
-        set_if_present(cad_cfg, "edges_npy", "cad_edges_npy", Path, defaults)
+        set_if_present(cad_cfg, "segments_npy", "cad_segments_npy", Path, defaults)
+        set_if_present(cad_cfg, "polylines_3d_npz", "cad_polylines_3d_npz", Path, defaults)
+        set_if_present(cad_cfg, "polylines_2d_npz", "cad_polylines_2d_npz", Path, defaults)
         set_if_present(cad_cfg, "projection_npy", "cad_projection_npy", Path, defaults)
         set_if_present(
             cad_cfg,
@@ -221,10 +223,22 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--cad-edges-npy",
+        "--cad-segments-npy",
         type=Path,
-        default=Path("output/cad_edges_2d.npy"),
-        help="Save 2D projected CAD edges here (default: output/cad_edges_2d.npy).",
+        default=Path("output/cad_segments_2d.npy"),
+        help="Save 2D projected CAD segments here (default: output/cad_segments_2d.npy).",
+    )
+    parser.add_argument(
+        "--cad-polylines-3d-npz",
+        type=Path,
+        default=Path("output/cad_polylines_3d.npz"),
+        help="Save 3D HLR polylines (list of variable-length arrays) here.",
+    )
+    parser.add_argument(
+        "--cad-polylines-2d-npz",
+        type=Path,
+        default=Path("output/cad_polylines_2d.npz"),
+        help="Save 2D projected polylines (list of variable-length arrays) here.",
     )
     parser.add_argument(
         "--cad-projection-npy",
@@ -285,6 +299,12 @@ def main() -> None:
             "Approximate spacing in meters between sampled points along HLR "
             "visible edges (cad-sample-mode=hlr)."
         ),
+    )
+    parser.add_argument(
+        "--cad-drop-rg-lines",
+        action="store_true",
+        default=False,
+        help="Exclude smooth regular lines (Rg1/RgN) from HLR output to keep only sharp/outline edges.",
     )
     parser.add_argument(
         "--cad-clip-bottom-height",
@@ -391,6 +411,7 @@ def main() -> None:
             projection_dir=(0.0, 0.0, 1.0),
             sample_step=args.cad_hlr_step,
             min_length=args.cad_min_length,
+            drop_rg_lines=args.cad_drop_rg_lines,
         )
         if hlr.polylines_world:
             verts_world = np.concatenate(hlr.polylines_world, axis=0)
@@ -412,19 +433,29 @@ def main() -> None:
         args.cad_points_npy.parent.mkdir(parents=True, exist_ok=True)
         np.save(args.cad_points_npy, verts_world)
 
-        args.cad_edges_npy.parent.mkdir(parents=True, exist_ok=True)
-        np.save(args.cad_edges_npy, edges_xy)
+        args.cad_segments_npy.parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.cad_segments_npy, edges_xy)
+
+        # Save polylines (variable length) as compressed npz with object array.
+        polys_3d = np.array(hlr.polylines_world, dtype=object)
+        args.cad_polylines_3d_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(args.cad_polylines_3d_npz, polylines=polys_3d)
+
+        polys_2d = np.array([p[:, :2] for p in hlr.polylines_world], dtype=object)
+        args.cad_polylines_2d_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(args.cad_polylines_2d_npz, polylines=polys_2d)
 
         if edges_xy.size:
             print(
-                f"Edges kept: {edges_xy.shape[0]:,}; "
+                f"Segments kept: {edges_xy.shape[0]:,}; "
                 f"saved 3D verts to {args.cad_points_npy}, "
-                f"2D edges to {args.cad_edges_npy}"
+                f"2D segments to {args.cad_segments_npy}, "
+                f"polylines to {args.cad_polylines_3d_npz} / {args.cad_polylines_2d_npz}"
             )
         else:
             print(
-                "No CAD edges survived filtering; saved aligned vertices only "
-                f"to {args.cad_points_npy} and empty edges to {args.cad_edges_npy}"
+                "No CAD segments survived filtering; saved aligned vertices only "
+                f"to {args.cad_points_npy} and empty segments/polylines outputs."
             )
 
         occupancy: np.ndarray

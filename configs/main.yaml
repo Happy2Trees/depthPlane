@@ -17,9 +17,12 @@ cad_overlay:
   unit_scale: 0.001         # CAD units to meters (e.g., mm -> m)
   min_length_m: 0.0         # drop edges shorter than this
   line_width_px: 3
+  drop_rg_lines: true         # drop smooth regular lines (Rg1/RgN) to keep sharp/outline edges only
   transform: data/pose/final_transformation_matrix.txt
   points_npy: output/cad_points_aligned.npy
-  edges_npy: output/cad_edges_2d.npy
+  segments_npy: output/cad_segments_2d.npy
+  polylines_3d_npz: output/cad_polylines_3d.npz
+  polylines_2d_npz: output/cad_polylines_2d.npz
   projection_npy: output/cad_projection.npy
   projection_image: visualize/cad_projection.png
   projection_mask_image: output/cad_projection_mask.png

@@ -23,6 +23,7 @@ from OCC.Core.StlAPI import StlAPI_Reader
 from OCC.Core.TopAbs import TopAbs_EDGE
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopoDS import TopoDS_Shape, TopoDS_Compound, topods
+from OCC.Core.TopTools import TopTools_ShapeMapHasher
 from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf
 
 
@@ -34,6 +35,7 @@ class HLRResult:
     edges_world: np.ndarray  # (E, 2, 3) sampled segments in LiDAR frame
     edges_xy: np.ndarray  # (E, 2, 2) planar segments (x, y only)
     projector_dir: Tuple[float, float, float]
+    skipped_rg_edges: int = 0
 
 
 def _read_step_or_iges(shape_path: Path) -> TopoDS_Shape:
@@ -185,13 +187,19 @@ def _shape_to_polylines(
     shape: TopoDS_Shape,
     *,
     step: float,
+    skip_hashes: set[int] | None = None,
 ) -> list[np.ndarray]:
-    """Discretize all edges of a shape into polylines."""
+    """Discretize edges of a shape into polylines, skipping hashed edges if requested."""
 
     polylines: list[np.ndarray] = []
     explorer = TopExp_Explorer(shape, TopAbs_EDGE)
     while explorer.More():
         edge = topods.Edge(explorer.Current())
+        if skip_hashes:
+            h = TopTools_ShapeMapHasher.HashCode(edge, 2_147_483_647)
+            if h in skip_hashes:
+                explorer.Next()
+                continue
         poly = _edge_to_polyline(edge, step=step)
         if poly is not None:
             polylines.append(poly)
@@ -227,6 +235,7 @@ def run_hlr_projection(
     projection_dir: Sequence[float] = (0.0, 0.0, 1.0),
     sample_step: float = 0.01,
     min_length: float = 0.0,
+    drop_rg_lines: bool = True,
 ) -> HLRResult:
     """Load CAD with PythonOCC, apply pose, run HLR, and sample visible edges."""
 
@@ -259,7 +268,19 @@ def run_hlr_projection(
     hlr_shapes = HLRBRep_HLRToShape(algo)
     visible = hlr_shapes.VCompound()
 
-    polylines = _shape_to_polylines(visible, step=sample_step)
+    skip_hashes: set[int] = set()
+    if drop_rg_lines:
+        rg1 = hlr_shapes.Rg1LineVCompound()
+        rgN = hlr_shapes.RgNLineVCompound()
+        for rg_shape in (rg1, rgN):
+            exp = TopExp_Explorer(rg_shape, TopAbs_EDGE)
+            while exp.More():
+                edge = topods.Edge(exp.Current())
+                h = TopTools_ShapeMapHasher.HashCode(edge, 2_147_483_647)
+                skip_hashes.add(h)
+                exp.Next()
+
+    polylines = _shape_to_polylines(visible, step=sample_step, skip_hashes=skip_hashes)
     segments = _polylines_to_segments(polylines, min_length=min_length)
 
     if segments:
@@ -274,4 +295,5 @@ def run_hlr_projection(
         edges_world=edges_world,
         edges_xy=edges_xy,
         projector_dir=(float(dir_norm[0]), float(dir_norm[1]), float(dir_norm[2])),
+        skipped_rg_edges=len(skip_hashes),
     )
