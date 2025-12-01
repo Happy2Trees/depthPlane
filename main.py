@@ -57,8 +57,11 @@ def _extract_config_defaults(config: dict[str, Any]) -> dict[str, Any]:
         set_if_present(depth_cfg, "plane_z_m", "plane_z", float, defaults)
         set_if_present(depth_cfg, "statistic", "statistic", str, defaults)
         set_if_present(depth_cfg, "chunk_size", "chunk_size", int, defaults)
+        set_if_present(depth_cfg, "outlier_method", "outlier_method", str, defaults)
         set_if_present(depth_cfg, "clip_min_mm", "clip_min_mm", float, defaults)
         set_if_present(depth_cfg, "clip_max_mm", "clip_max_mm", float, defaults)
+        set_if_present(depth_cfg, "iqr_multiplier", "iqr_multiplier", float, defaults)
+        set_if_present(depth_cfg, "iqr_sample_size", "iqr_sample_size", int, defaults)
         set_if_present(depth_cfg, "output_npy", "output_npy", Path, defaults)
         set_if_present(depth_cfg, "output_image", "output_image", Path, defaults)
         set_if_present(depth_cfg, "meta_json", "meta_json", Path, defaults)
@@ -149,16 +152,49 @@ def main() -> None:
         help="Number of points per chunk while streaming the LAS file (default: 2,000,000).",
     )
     parser.add_argument(
+        "--outlier-method",
+        choices=["clip", "iqr", "none"],
+        default="clip",
+        help=(
+            "Outlier filter to apply: 'clip' uses clip-min/max, 'iqr' derives bounds via "
+            "interquartile range, 'none' disables filtering."
+        ),
+    )
+    parser.add_argument(
         "--clip-min-mm",
         type=float,
         default=None,
-        help="Ignore points with z (m) below this threshold converted from mm (e.g., 1300).",
+        help=(
+            "Ignore points with z (m) below this threshold converted from mm (used when "
+            "outlier-method=clip; e.g., 1300)."
+        ),
     )
     parser.add_argument(
         "--clip-max-mm",
         type=float,
         default=None,
-        help="Ignore points with z (m) above this threshold converted from mm (e.g., 1600).",
+        help=(
+            "Ignore points with z (m) above this threshold converted from mm (used when "
+            "outlier-method=clip; e.g., 1600)."
+        ),
+    )
+    parser.add_argument(
+        "--iqr-multiplier",
+        type=float,
+        default=1.5,
+        help=(
+            "Whisker coefficient k for IQR bounds (Q1 - k*IQR, Q3 + k*IQR) when "
+            "outlier-method=iqr."
+        ),
+    )
+    parser.add_argument(
+        "--iqr-sample-size",
+        type=int,
+        default=500_000,
+        help=(
+            "Number of z samples used to estimate IQR bounds; set <=0 to use all points "
+            "(may increase memory/time)."
+        ),
     )
     parser.add_argument(
         "--output-npy",
@@ -352,12 +388,47 @@ def main() -> None:
             statistic=args.statistic,
             chunk_size=args.chunk_size,
             progress=not args.quiet,
-            clip_min=None if args.clip_min_mm is None else args.clip_min_mm / 1000.0,
-            clip_max=None if args.clip_max_mm is None else args.clip_max_mm / 1000.0,
+            outlier_method=args.outlier_method,
+            clip_min=(
+                None
+                if args.outlier_method != "clip" or args.clip_min_mm is None
+                else args.clip_min_mm / 1000.0
+            ),
+            clip_max=(
+                None
+                if args.outlier_method != "clip" or args.clip_max_mm is None
+                else args.clip_max_mm / 1000.0
+            ),
+            iqr_multiplier=args.iqr_multiplier,
+            iqr_sample_size=args.iqr_sample_size,
         )
     except Exception as exc:  # pragma: no cover - surfaced for CLI users
         print(f"Failed to generate depth map: {exc}", file=sys.stderr)
         raise
+
+    if result.outlier_method == "iqr":
+        clip_min_mm = None if result.clip_min is None else result.clip_min * 1000.0
+        clip_max_mm = None if result.clip_max is None else result.clip_max * 1000.0
+        print(
+            "[depth-map] outlier filter: IQR "
+            f"k={result.iqr_multiplier}, bounds "
+            f"{clip_min_mm:.1f}-{clip_max_mm:.1f} mm "
+            f"from {result.iqr_sample_count:,} samples",
+        )
+    elif result.outlier_method == "clip" and (
+        result.clip_min is not None or result.clip_max is not None
+    ):
+        clip_min_mm = None if result.clip_min is None else result.clip_min * 1000.0
+        clip_max_mm = None if result.clip_max is None else result.clip_max * 1000.0
+        bounds: list[str] = []
+        if clip_min_mm is not None:
+            bounds.append(f">= {clip_min_mm:.1f} mm")
+        if clip_max_mm is not None:
+            bounds.append(f"<= {clip_max_mm:.1f} mm")
+        bound_text = " and ".join(bounds) if bounds else "(no bounds)"
+        print(f"[depth-map] outlier filter: clip {bound_text}")
+    else:
+        print("[depth-map] outlier filter: none")
 
     # Depth와 메타데이터 저장
     meta = {
@@ -366,8 +437,15 @@ def main() -> None:
         "bbox_xy_minmax": tuple(map(float, result.bbox)),
         "extent_xy_minmax": tuple(map(float, result.extent)),
         "statistic": args.statistic,
-        "clip_min_mm": None if args.clip_min_mm is None else float(args.clip_min_mm),
-        "clip_max_mm": None if args.clip_max_mm is None else float(args.clip_max_mm),
+        "outlier_method": result.outlier_method,
+        "clip_min_mm": (
+            None if result.clip_min is None else float(result.clip_min * 1000.0)
+        ),
+        "clip_max_mm": (
+            None if result.clip_max is None else float(result.clip_max * 1000.0)
+        ),
+        "iqr_multiplier": result.iqr_multiplier,
+        "iqr_sample_count": result.iqr_sample_count,
         "depth_shape": tuple(int(x) for x in result.depth_mm.shape),
         "dtype": "float32",
         "description": "Depth map metadata; depth array saved separately in output_npy.",

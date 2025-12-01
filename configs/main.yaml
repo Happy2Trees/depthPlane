@@ -6,11 +6,14 @@ depth_map:
   plane_z_m: 0.0
   statistic: mean           # min | max | mean
   chunk_size: 2000000       # points per stream chunk
+  outlier_method: iqr      # clip | iqr | none
   clip_min_mm: 1300         # ignore z below this (mm), null to disable
   clip_max_mm: 1600         # ignore z above this (mm), null to disable
-  output_npy: output/depth_map.npy
+  iqr_multiplier: 0.7       # Q1 - k*IQR, Q3 + k*IQR bounds when outlier_method=iqr
+  iqr_sample_size: 50000000   # number of z samples for IQR estimate; null or <=0 uses all
+  output_npy: output/depth_map_IQR.npy
   meta_json: output/metadata.json
-  output_image: visualize/depth_map.png
+  output_image: visualize/depth_map_IQR.png
 
 cad_overlay:
   mesh: data/CAD_wo_btm.stl
